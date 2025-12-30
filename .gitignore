@@ -1,0 +1,12 @@
+# Vim
+*.swp
+*.swo
+*~
+tags
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

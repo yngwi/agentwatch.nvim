@@ -1,0 +1,165 @@
+*agentwatch.txt*  File synchronization for external changes
+
+Author:   Daniel Jeller
+License:  MIT
+
+==============================================================================
+INTRODUCTION                                              *agentwatch*
+
+agentwatch detects when external tools modify files and synchronizes
+Neovim's state:
+
+- Reloads buffers (preserving undo history)
+- Notifies LSP servers (workspace/didChangeWatchedFiles)
+- Detects conflicts (defers to Neovim's W12 warning)
+
+==============================================================================
+SETUP                                                     *agentwatch-setup*
+
+>lua
+    require("agentwatch").setup({})
+<
+
+Calling setup() immediately starts watching the current working directory.
+The watched path updates automatically on |DirChanged|.
+Use `enabled = false` to load without starting the watcher.
+
+Files outside cwd are not watched. This is intentional - the watcher respects
+your chosen working directory scope.
+
+==============================================================================
+CONFIGURATION                                             *agentwatch-config*
+
+Default configuration:
+>lua
+    require("agentwatch").setup({
+      enabled = true,
+
+      watch = {
+        debounce_ms = 150,
+        stability_ms = 50,
+        use_gitignore = true,
+        ignore_patterns = {
+          "%.git/",   -- git internals
+          "~$",       -- backup files
+          "%.swp$",   -- vim swap
+          "%.swo$",
+          "4913$",    -- vim temp
+        },
+        include_patterns = nil,
+        watch_hidden = false,
+      },
+
+      buffer = {
+        notify_on_reload = false,
+        notify_on_conflict = false,
+        restore_view = true,
+      },
+
+      lsp = {
+        mode = "complement",
+      },
+
+      debug = {
+        enabled = false,
+        log_file = nil,
+      },
+    })
+<
+
+                                                          *agentwatch-watch*
+watch.debounce_ms ~
+    Milliseconds to wait before processing changes. Batches rapid writes.
+
+watch.stability_ms ~
+    Milliseconds to verify file stopped changing. Prevents reading mid-write.
+
+watch.use_gitignore ~
+    Parse .gitignore in cwd and ignore matching files. Reloads on |DirChanged|.
+    Negation patterns (!) are skipped. Default: true.
+
+watch.ignore_patterns ~
+    Lua patterns (merged with defaults, not replaced). Paths normalized to
+    forward slashes before matching. Defaults cover git/vim artifacts.
+
+    Common Lua pattern syntax:
+      %.       literal dot (. is "any char" in Lua patterns)
+      /name/   directory as path component
+      name$    match at end of path
+      [a-z]    character class
+
+    Examples: >lua
+      ignore_patterns = {
+        "%.env$",         -- files ending in .env
+        "/vendor/",       -- vendor directory anywhere
+        "%.min%.js$",     -- minified JS files
+      }
+<
+
+watch.include_patterns ~
+    Optional whitelist. If set, only matching files are processed.
+
+watch.watch_hidden ~
+    When false (default), dotfiles are ignored.
+
+                                                          *agentwatch-buffer*
+buffer.notify_on_reload ~
+    Show notification when a buffer is reloaded.
+
+buffer.notify_on_conflict ~
+    Show notification when conflict detected. Neovim's W12 handles resolution.
+
+buffer.restore_view ~
+    Restore cursor position and scroll after reload.
+
+                                                          *agentwatch-lsp*
+lsp.mode ~
+    "complement"  Only notify clients that registered for file watching
+                  or have the capability. (Default)
+    "replace"     Notify all clients for relevant filetypes.
+    "off"         No LSP notifications.
+
+==============================================================================
+COMMANDS                                                  *agentwatch-commands*
+
+:AgentwatchStatus                                         *:AgentwatchStatus*
+    Display current state, watched paths, and queued events.
+
+:AgentwatchPause                                          *:AgentwatchPause*
+    Pause file watching. Events are queued until resume.
+
+:AgentwatchResume                                         *:AgentwatchResume*
+    Resume file watching and process queued events.
+
+:AgentwatchReload                                         *:AgentwatchReload*
+    Reload the plugin. For development use.
+
+==============================================================================
+API                                                       *agentwatch-api*
+
+agentwatch.setup({opts})                                  *agentwatch.setup()*
+    Initialize the plugin.
+
+agentwatch.pause()                                        *agentwatch.pause()*
+    Pause file watching. Events are queued.
+
+agentwatch.resume()                                       *agentwatch.resume()*
+    Resume watching and process queued events.
+
+agentwatch.is_paused()                                    *agentwatch.is_paused()*
+    Returns true if paused.
+
+agentwatch.sync()                                         *agentwatch.sync()*
+    Reload all buffers from disk (if not modified).
+
+agentwatch.sync_buffer({bufnr})                           *agentwatch.sync_buffer()*
+    Reload specific buffer from disk (if not modified).
+
+agentwatch.status()                                       *agentwatch.status()*
+    Returns table with state, watched_paths, queued_events, config.
+
+agentwatch.on({event}, {callback})                        *agentwatch.on()*
+    Register callback for events: "reload", "conflict", "lsp_notify".
+
+==============================================================================
+vim:tw=78:ts=8:ft=help:norl:
