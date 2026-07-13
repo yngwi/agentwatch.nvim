@@ -10,16 +10,26 @@ M._registered_watchers = {}
 ---@type boolean Whether capability tracking is already set up
 M._tracking_setup = false
 
+---@type function? Original handlers (restored by teardown)
+M._orig_register = nil
+M._orig_unregister = nil
+
 function M.setup_capability_tracking()
   if M._tracking_setup then
     return
   end
   M._tracking_setup = true
 
-  local orig_handler = vim.lsp.handlers["client/registerCapability"]
+  M._orig_register = vim.lsp.handlers["client/registerCapability"]
+  M._orig_unregister = vim.lsp.handlers["client/unregisterCapability"]
 
   vim.lsp.handlers["client/registerCapability"] = function(err, result, ctx, cfg)
+    local forwarded = result
     if result and result.registrations then
+      -- In "replace" mode, keep watch registrations to ourselves so Neovim's
+      -- built-in file watcher never starts
+      local strip = config.get().lsp.mode == "replace"
+      local kept = {}
       for _, reg in ipairs(result.registrations) do
         if reg.method == "workspace/didChangeWatchedFiles" then
           M._registered_watchers[ctx.client_id] = {
@@ -27,16 +37,74 @@ function M.setup_capability_tracking()
             patterns = M._parse_watch_patterns(reg.registerOptions),
           }
           util.log("debug", string.format(
-            "Client %d registered for file watching", ctx.client_id
+            "Client %d registered for file watching%s",
+            ctx.client_id, strip and " (built-in watcher suppressed)" or ""
           ))
+          if not strip then
+            table.insert(kept, reg)
+          end
+        else
+          table.insert(kept, reg)
         end
       end
+      if #kept == 0 and #result.registrations > 0 then
+        -- Everything was stripped: don't bother the original handler
+        return vim.NIL
+      end
+      forwarded = vim.tbl_extend("force", {}, result)
+      forwarded.registrations = kept
     end
 
-    if orig_handler then
-      return orig_handler(err, result, ctx, cfg)
+    if M._orig_register then
+      return M._orig_register(err, forwarded, ctx, cfg)
     end
+    return vim.NIL
   end
+
+  vim.lsp.handlers["client/unregisterCapability"] = function(err, result, ctx, cfg)
+    local forwarded = result
+    -- "unregisterations" is the official (misspelled) LSP field name
+    if result and result.unregisterations then
+      local strip = config.get().lsp.mode == "replace"
+      local kept = {}
+      for _, unreg in ipairs(result.unregisterations) do
+        if unreg.method == "workspace/didChangeWatchedFiles" then
+          local recorded = M._registered_watchers[ctx.client_id]
+          if recorded and recorded.id == unreg.id then
+            M._registered_watchers[ctx.client_id] = nil
+          end
+          if not strip then
+            table.insert(kept, unreg)
+          end
+        else
+          table.insert(kept, unreg)
+        end
+      end
+      if #kept == 0 and #result.unregisterations > 0 then
+        return vim.NIL
+      end
+      forwarded = vim.tbl_extend("force", {}, result)
+      forwarded.unregisterations = kept
+    end
+
+    if M._orig_unregister then
+      return M._orig_unregister(err, forwarded, ctx, cfg)
+    end
+    return vim.NIL
+  end
+end
+
+--- Restore the original LSP handlers (used by :AgentwatchReload).
+function M.teardown()
+  if not M._tracking_setup then
+    return
+  end
+  vim.lsp.handlers["client/registerCapability"] = M._orig_register
+  vim.lsp.handlers["client/unregisterCapability"] = M._orig_unregister
+  M._orig_register = nil
+  M._orig_unregister = nil
+  M._registered_watchers = {}
+  M._tracking_setup = false
 end
 
 ---@param options table
@@ -89,22 +157,17 @@ function M._should_notify(client, filepath)
   local cfg = config.get()
 
   local registered = M._registered_watchers[client.id]
-  if registered and M._matches_patterns(filepath, registered.patterns) then
-    return true
-  end
-
-  if cfg.lsp.mode == "complement" then
-    local caps = client.server_capabilities
-    if caps and caps.workspace and caps.workspace.didChangeWatchedFiles then
-      return M._is_relevant_filetype(client, filepath)
-    end
-    return false
+  if registered then
+    return M._matches_patterns(filepath, registered.patterns)
   end
 
   if cfg.lsp.mode == "replace" then
+    -- No dynamic registration (e.g. the client capability is disabled):
+    -- fall back to a filetype heuristic
     return M._is_relevant_filetype(client, filepath)
   end
 
+  -- complement: servers that did not register don't want these notifications
   return false
 end
 
@@ -149,7 +212,7 @@ function M._is_relevant_filetype(client, filepath)
   local ext = vim.fn.fnamemodify(filepath, ":e")
   local ft = vim.filetype.match({ filename = filepath }) or ext
 
-  local client_filetypes = client.config.filetypes
+  local client_filetypes = client.config and client.config.filetypes
   if client_filetypes then
     for _, client_ft in ipairs(client_filetypes) do
       if client_ft == ft then

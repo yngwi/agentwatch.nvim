@@ -17,7 +17,7 @@
 
 local M = {}
 
----@type "idle"|"debouncing"|"paused"
+---@type "idle"|"paused"
 M._state = "idle"
 
 ---@type table[] Queued events when paused
@@ -60,12 +60,37 @@ function M.setup(opts)
   M._register_autocmds()
 end
 
+---@type integer[] Buffers whose local 'autoread' was disabled by pause()
+M._autoread_disabled = {}
+
 --- Pause file watching (events will be queued)
 function M.pause()
   if M._state == "paused" then
     return
   end
   M._state = "paused"
+
+  -- Vim reloads unmodified buffers directly when 'autoread' applies —
+  -- FileChangedShell is bypassed entirely — so a checktime during the pause
+  -- would still read files mid-write. Disable autoread per watched buffer
+  -- for the duration; our FileChangedShell handler queues the change instead.
+  M._autoread_disabled = {}
+  local watcher = require("agentwatch.watcher")
+  for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_loaded(bufnr) then
+      local name = vim.api.nvim_buf_get_name(bufnr)
+      -- 'autoread' is global-local: the local value is nil when unset
+      local autoread = vim.api.nvim_get_option_value("autoread", { buf = bufnr, scope = "local" })
+      if autoread == nil then
+        autoread = vim.go.autoread
+      end
+      if name ~= "" and autoread and watcher.is_watched(name) then
+        vim.bo[bufnr].autoread = false
+        table.insert(M._autoread_disabled, bufnr)
+      end
+    end
+  end
+
   require("agentwatch.util").log("info", "agentwatch paused")
 end
 
@@ -75,6 +100,15 @@ function M.resume()
     return
   end
   M._state = "idle"
+
+  for _, bufnr in ipairs(M._autoread_disabled) do
+    if vim.api.nvim_buf_is_valid(bufnr) then
+      pcall(vim.api.nvim_buf_call, bufnr, function()
+        vim.cmd("setlocal autoread<")
+      end)
+    end
+  end
+  M._autoread_disabled = {}
 
   local util = require("agentwatch.util")
 
@@ -234,6 +268,10 @@ function M._register_commands()
     -- Save opts before clearing modules
     local saved_opts = M._user_opts
 
+    -- Stop watchers and restore LSP handlers before the module state holding
+    -- them is discarded, or the old fs_event handles keep firing forever
+    M._teardown()
+
     -- Clear cached modules
     for name, _ in pairs(package.loaded) do
       if name:match("^agentwatch") then
@@ -245,6 +283,17 @@ function M._register_commands()
     require("agentwatch").setup(saved_opts)
     vim.notify("agentwatch reloaded", vim.log.levels.INFO)
   end, { desc = "Reload agentwatch plugin (development)" })
+end
+
+--- Release everything owned by the currently loaded modules.
+function M._teardown()
+  pcall(function()
+    require("agentwatch.watcher").stop()
+  end)
+  pcall(function()
+    require("agentwatch.lsp").teardown()
+  end)
+  pcall(vim.api.nvim_del_augroup_by_name, "agentwatch")
 end
 
 function M._register_autocmds()
@@ -271,6 +320,50 @@ function M._register_autocmds()
         local util = require("agentwatch.util")
         filepath = util.normalize_path(vim.fn.fnamemodify(filepath, ":p"))
         watcher.record_write(filepath)
+      end
+    end,
+  })
+
+  -- Take over Vim's own external-change handling (checktime/autoread):
+  -- suppress it for buffers agentwatch already synced, and hold changes to
+  -- watched files while paused so external tools can write undisturbed
+  vim.api.nvim_create_autocmd("FileChangedShell", {
+    group = group,
+    callback = function(ev)
+      local bufnr = ev.buf
+      local reason = vim.v.fcs_reason
+      local modified = vim.bo[bufnr].modified
+
+      if not modified and reason ~= "deleted" then
+        -- Already synced by agentwatch: nothing left for Vim to do
+        local synced = vim.b[bufnr].agentwatch_synced_mtime
+        if synced then
+          local stat = vim.uv.fs_stat(ev.file)
+          if stat and stat.mtime.sec == synced.sec and stat.mtime.nsec == synced.nsec then
+            vim.v.fcs_choice = ""
+            return
+          end
+        end
+
+        -- Paused: queue the change and reload on resume() instead of now
+        if M._state == "paused" and require("agentwatch.watcher").is_watched(ev.file) then
+          local util = require("agentwatch.util")
+          table.insert(M._event_queue, {
+            filepath = util.normalize_path(vim.fn.fnamemodify(ev.file, ":p")),
+            change_type = 2,
+          })
+          vim.v.fcs_choice = ""
+          return
+        end
+      end
+
+      -- Mimic Vim's default handling for everything else
+      if reason == "time" or reason == "mode" then
+        vim.v.fcs_choice = ""
+      elseif reason == "changed" and not modified and vim.o.autoread then
+        vim.v.fcs_choice = "reload"
+      else
+        vim.v.fcs_choice = "ask"
       end
     end,
   })

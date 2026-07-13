@@ -1,5 +1,40 @@
 # agentwatch.nvim
 
+> [!WARNING]
+> **Retired / unmaintained.** On **macOS and Windows**, Neovim's built-in LSP
+> file watching (`workspace/didChangeWatchedFiles`, enabled by default since
+> 0.10) already keeps language servers in sync with on-disk changes to files
+> you haven't opened — the main thing this plugin existed for. Paired with a
+> few lines of config for buffer reloading, you don't need it there.
+>
+> **Replacement (macOS/Windows):** nothing for the LSP side. For reloading
+> buffers changed on disk, one autocmd:
+>
+> ```lua
+> vim.o.autoread = true -- already the default; set explicitly for clarity
+> vim.api.nvim_create_autocmd(
+>   { "FocusGained", "BufEnter", "TermLeave", "CursorHold", "CursorHoldI" },
+>   {
+>     group = vim.api.nvim_create_augroup("autoreload", { clear = true }),
+>     callback = function()
+>       if vim.o.buftype == "" then vim.cmd("silent! checktime") end
+>     end,
+>   }
+> )
+> ```
+>
+> Unmodified buffers reload silently; buffers with unsaved edits get Vim's W12
+> prompt; deleted files are left as-is — the same behaviour this plugin gave.
+>
+> **On Linux**, Neovim disables the built-in watcher by default (no scalable
+> recursive inotify backend — see [#23291](https://github.com/neovim/neovim/issues/23291)),
+> so this plugin's approach still fills a real gap. The final code here is
+> functional — a per-directory Linux watcher, mid-write stability checks, and
+> an LSP `replace` mode that stops the built-in from double-watching — but it
+> is no longer actively maintained. Fork if you need it.
+
+---
+
 File watcher for Neovim that synchronizes buffers and LSP when external tools modify files.
 
 ## The Problem
@@ -21,11 +56,16 @@ Neovim 0.10+ has `workspace/didChangeWatchedFiles`, but:
 
 ## Features
 
-- Cross-platform file watching (libuv)
+- Cross-platform file watching (libuv): recursive fs_event on macOS/Windows,
+  per-directory watchers on Linux/BSD (libuv's recursive flag is silently
+  ignored there — see `:h agentwatch-watch`)
 - Buffer reloading with undo preservation
-- LSP notifications
+- LSP notifications, including a `replace` mode that takes over file watching
+  from Neovim's built-in (useful on Linux, where the built-in either doesn't
+  run or falls back to polling)
 - Conflict detection (defers to Neovim's W12 warning)
-- Pause/resume API for tool integration
+- Pause/resume API for tool integration (also holds off Vim's own `autoread`
+  while paused)
 
 ## Installation
 
@@ -49,6 +89,7 @@ require("agentwatch").setup({
   enabled = true,
 
   watch = {
+    backend = "auto",           -- "auto" | "recursive" | "walk"
     debounce_ms = 150,
     stability_ms = 50,
     use_gitignore = true,       -- parse .gitignore (default: true)

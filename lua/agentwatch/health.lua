@@ -35,8 +35,6 @@ function M.check()
     vim.health.ok("State: idle")
   elseif state == "paused" then
     vim.health.warn("State: paused (" .. #agentwatch._event_queue .. " events queued)")
-  elseif state == "debouncing" then
-    vim.health.info("State: debouncing")
   else
     vim.health.warn("State: " .. tostring(state))
   end
@@ -56,6 +54,15 @@ function M.check()
     else
       vim.health.warn("No paths being watched")
     end
+
+    if watcher._backend == "recursive" then
+      vim.health.info("Backend: recursive (single fs_event per root)")
+    else
+      vim.health.info("Backend: walk (one fs_event per directory)")
+    end
+    if watcher._overflowed then
+      vim.health.warn("Directory watcher limit reached; some subdirectories are not watched")
+    end
   end
 
   vim.health.start("agentwatch: ignore patterns")
@@ -68,7 +75,11 @@ function M.check()
 
   if cfg.watch.use_gitignore then
     if #gitignore_patterns > 0 then
-      vim.health.info("Gitignore (" .. #gitignore_patterns .. "): " .. table.concat(gitignore_patterns, ", "))
+      local globs = {}
+      for _, entry in ipairs(gitignore_patterns) do
+        table.insert(globs, entry.glob)
+      end
+      vim.health.info("Gitignore (" .. #globs .. "): " .. table.concat(globs, ", "))
     else
       vim.health.info("Gitignore: no .gitignore found")
     end

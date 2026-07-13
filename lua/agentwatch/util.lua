@@ -4,6 +4,9 @@ local M = {}
 ---@type file*?
 M._log_file = nil
 
+---@type string? Cached default log path (vim.fn is unavailable in fast callbacks)
+M._default_log_path = nil
+
 function M.close_log()
   if M._log_file then
     M._log_file:close()
@@ -26,7 +29,13 @@ function M.log(level, msg)
 
   local log_path = cfg.debug.log_file
   if cfg.debug.enabled and not log_path then
-    log_path = vim.fn.stdpath("log") .. "/agentwatch.log"
+    if not M._default_log_path then
+      local ok, dir = pcall(vim.fn.stdpath, "log")
+      if ok then
+        M._default_log_path = dir .. "/agentwatch.log"
+      end
+    end
+    log_path = M._default_log_path
   end
 
   if log_path then

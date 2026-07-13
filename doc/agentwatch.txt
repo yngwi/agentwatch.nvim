@@ -36,15 +36,16 @@ Default configuration:
       enabled = true,
 
       watch = {
+        backend = "auto",  -- "auto" | "recursive" | "walk"
         debounce_ms = 150,
         stability_ms = 50,
         use_gitignore = true,
         ignore_patterns = {
-          "%.git/",   -- git internals
+          "/%.git/",  -- git internals
           "~$",       -- backup files
           "%.swp$",   -- vim swap
           "%.swo$",
-          "4913$",    -- vim temp
+          "/4913$",   -- vim temp
         },
         include_patterns = nil,
         watch_hidden = false,
@@ -68,6 +69,18 @@ Default configuration:
 <
 
                                                           *agentwatch-watch*
+watch.backend ~
+    File watching strategy. "auto" (default) picks per platform:
+
+    "recursive"  One fs_event handle per root with recursive watching.
+                 Used on macOS and Windows — the only platforms where
+                 libuv supports the recursive flag.
+    "walk"       One fs_event handle per directory. Used on Linux and
+                 BSD, where libuv silently ignores the recursive flag.
+                 New directories are picked up as they appear; ignored
+                 directories (gitignore, hidden) are never watched, so
+                 large trees like node_modules cost nothing.
+
 watch.debounce_ms ~
     Milliseconds to wait before processing changes. Batches rapid writes.
 
@@ -75,7 +88,10 @@ watch.stability_ms ~
     Milliseconds to verify file stopped changing. Prevents reading mid-write.
 
 watch.use_gitignore ~
-    Parse .gitignore in cwd and ignore matching files. Reloads on |DirChanged|.
+    Parse .gitignore in cwd and ignore matching files. Patterns are matched
+    relative to the .gitignore location with gitignore semantics (anchored
+    patterns, directory-only patterns, `**` globs, character classes).
+    Reloads on |DirChanged| and when .gitignore itself changes.
     Negation patterns (!) are skipped. Default: true.
 
 watch.ignore_patterns ~
@@ -100,7 +116,10 @@ watch.include_patterns ~
     Optional whitelist. If set, only matching files are processed.
 
 watch.watch_hidden ~
-    When false (default), dotfiles are ignored.
+    When false (default), dotfiles and files inside hidden directories are
+    ignored. Hidden path components are checked relative to the watch root,
+    so a project located under a hidden directory (e.g. ~/.config/foo) is
+    watched normally.
 
                                                           *agentwatch-buffer*
 buffer.notify_on_reload ~
@@ -114,10 +133,27 @@ buffer.restore_view ~
 
                                                           *agentwatch-lsp*
 lsp.mode ~
-    "complement"  Only notify clients that registered for file watching
-                  or have the capability. (Default)
-    "replace"     Notify all clients for relevant filetypes.
+    "complement"  Notify clients that dynamically registered for file
+                  watching, alongside Neovim's built-in watcher. (Default)
+                  Note: on macOS/Windows the built-in watcher also reports
+                  external changes, so registered servers may receive the
+                  same change twice (harmless).
+    "replace"     Take over file watching: registrations are recorded but
+                  not forwarded, so Neovim's built-in watcher never starts.
+                  Registered clients are notified for matching patterns;
+                  clients without a registration fall back to a filetype
+                  heuristic.
     "off"         No LSP notifications.
+
+    Linux note: Neovim advertises `didChangeWatchedFiles.dynamicRegistration
+    = false` on Linux by default, so servers will not request file watching
+    at all. To get LSP file-watching on Linux, advertise the capability in
+    your server configuration and use "replace" (which prevents Neovim's
+    polling fallback from starting): >lua
+      local caps = vim.lsp.protocol.make_client_capabilities()
+      caps.workspace.didChangeWatchedFiles.dynamicRegistration = true
+      -- pass caps to your LSP setup, and set lsp.mode = "replace"
+<
 
 ==============================================================================
 COMMANDS                                                  *agentwatch-commands*
@@ -141,10 +177,13 @@ agentwatch.setup({opts})                                  *agentwatch.setup()*
     Initialize the plugin.
 
 agentwatch.pause()                                        *agentwatch.pause()*
-    Pause file watching. Events are queued.
+    Pause file watching. Events are queued. Also temporarily disables
+    'autoread' for watched buffers: Vim reloads unmodified buffers directly
+    (bypassing |FileChangedShell|) when 'autoread' applies, which would
+    defeat the purpose of pausing. resume() restores it.
 
 agentwatch.resume()                                       *agentwatch.resume()*
-    Resume watching and process queued events.
+    Resume watching and process queued events (deduplicated per file).
 
 agentwatch.is_paused()                                    *agentwatch.is_paused()*
     Returns true if paused.
